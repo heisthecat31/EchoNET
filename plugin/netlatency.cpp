@@ -20,7 +20,7 @@
 // incoming loss at +0x38 / +0x3c (floats). Non-zero values hold packets in a queue until
 // due. The log reports them; zero_sim=1 clears them.
 //
-// NetLatency.ini next to the DLL, re-read every 2 s (so the fix can be A/B tested live):
+// NetLatency.ini next to the DLL, re-read every 5 s (so the fix can be A/B tested live):
 //   [net]
 //   flush=1
 //   zero_sim=1
