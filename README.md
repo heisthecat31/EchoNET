@@ -62,9 +62,13 @@ answer.
   the frame pacer): those waits are cut into 1 ms slices with the socket checked between them.
   A wait still ends the moment it would have, so frame timing doesn't change.
 
-Both are off by default. Against a server on the same PC they changed the ping by 1-2 ms,
-which is within run-to-run noise there; what they can save over the internet (up to most of a
-frame) needs testing on a real server. `EchoNET.log` counts the extra reads.
+Both are off by default, and **leave them off**: in a real match they break how other players
+are drawn. Their updates are then applied part-way through your frame, after the frame has
+already placed their cosmetics and nametag, so bodies, arms, discs, cosmetics and nametags end
+up drawn from different updates and drift apart (players look like they're coming apart).
+Against a server on the same PC they changed the ping by only 1-2 ms anyway. A version that
+reads early but holds everything except the server's ping message until frame start would
+avoid this; it hasn't been written.
 
 ## The F9 "Avg Ping"
 
