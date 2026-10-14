@@ -20,14 +20,26 @@ Your movement reaches the server ~10 ms sooner on every frame that produces new 
 server and the client's receive side, which a client-only plugin can't usefully change.
 The game's built-in network simulator (fake delay / jitter / loss) was checked and is off.
 
+## Your ping number goes down too
+
+The ping the game shows is the server's estimate of your round trip, and part of it is your
+client's reply to the server's ping, which stock Echo also holds until the start of the next
+frame (up to ~11 ms at 90 Hz). `flush=1` sends that reply in the frame it was made, so the
+number drops, as in the table above. Over the internet `qos=1` can add to that: on Wi-Fi or a
+busy home network, tagging the game's packets as voice traffic gets them past other traffic
+queued in the router, which can be tens of milliseconds. Reported on a remote (Pennsylvania)
+server: about 20 ms lower with EchoNET. How much you gain depends on your frame rate and your
+network.
+
 ## Every-frame state (`send_every_frame=1`)
 
 The client sends its player state (`R15NetPlayerStateMsg`) and the physics it owns
 (`R15NetPhysicsSimStateEvent`) on a timer: the interval at component system +0x150 / +0x158
 is 22222 µs, so 45 Hz (every other frame at 90 fps). `send_every_frame=1` sets it to 1, so
 both go out every frame: the server's copy of you is on average ~5.5 ms fresher. Costs about
-twice the upload for those two messages. The ping number doesn't change (ping uses its own
-messages). Tested on our own servers: no warnings in their logs.
+twice the upload for those two messages. This setting on its own doesn't move the ping
+number, because ping is measured with its own messages, not these; `flush` and `qos` are what
+lower it (see above). Tested on our own servers: no warnings in their logs.
 
 ## Wi-Fi priority (`qos=1`)
 
