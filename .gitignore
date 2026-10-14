@@ -1,2 +1,24 @@
+# Build output (build.bat)
 out/
 obj/
+*.obj
+*.exp
+*.pdb
+*.ilk
+*.dll
+
+# Libraries, except the bundled Detours one the build links
+*.lib
+!third_party/detours/detours.lib
+
+# Runtime logs the plugin writes next to itself
+*.log
+
+# Editors and OS
+.vs/
+.vscode/
+*.user
+*.suo
+Thumbs.db
+desktop.ini
+.DS_Store

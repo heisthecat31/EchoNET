@@ -1,4 +1,4 @@
-// NetLatency: measure and cut the latency Echo VR (PC build 631547.rad15_live) adds on top
+// EchoNET: measure and cut the latency Echo VR (PC build 631547.rad15_live) adds on top
 // of the network, client side only.
 //
 // Echo has no network thread. Once per frame CR15NetGame::Update (+0x1bf610), from phase 0
@@ -20,11 +20,11 @@
 // incoming loss at +0x38 / +0x3c (floats). Non-zero values hold packets in a queue until
 // due. The log reports them; zero_sim=1 clears them.
 //
-// NetLatency.ini next to the DLL, re-read every 5 s (so the fix can be A/B tested live):
+// EchoNET.ini next to the DLL, re-read every 5 s (so the fix can be A/B tested live):
 //   [net]
 //   flush=1
 //   zero_sim=1
-// NetLatency.log: every 5 s, frame time, where in the frame packets were sent, and how
+// EchoNET.log: every 5 s, frame time, where in the frame packets were sent, and how
 // many went out early thanks to flush.
 
 #include <winsock2.h>
@@ -115,7 +115,7 @@ int g_flush_phase = -1;
 
 void Log(const char *fmt, ...) {
     char path[MAX_PATH];
-    sprintf_s(path, "%sNetLatency.log", g_dir);
+    sprintf_s(path, "%sEchoNET.log", g_dir);
     FILE *f = nullptr;
     if (fopen_s(&f, path, "a") != 0 || !f) return;
     SYSTEMTIME t;
@@ -137,7 +137,7 @@ bool Check(const uint8_t *at, const uint8_t *bytes, size_t n, const char *what) 
 
 void ReadIni() {
     char path[MAX_PATH];
-    sprintf_s(path, "%sNetLatency.ini", g_dir);
+    sprintf_s(path, "%sEchoNET.ini", g_dir);
     LONG flush = GetPrivateProfileIntA("net", "flush", 1, path);
     LONG zero = GetPrivateProfileIntA("net", "zero_sim", 1, path);
     LONG qos = GetPrivateProfileIntA("net", "qos", 1, path);
