@@ -203,8 +203,11 @@ void Report(int64_t now) {
             s.phase_sends[0], s.phase_sends[1], s.phase_sends[2], s.phase_sends[3], s.sends_other);
         if (g_drain)
             Log("  drain: %llu mid-frame socket reads", (unsigned long long)g_drains);
+        if (g_idle_pump)
+            Log("  idle_pump: %llu socket reads while waiting between frames", (unsigned long long)g_idle_pumps);
     }
     g_drains = 0;
+    g_idle_pumps = 0;
     if (g_trace) {
         AcquireSRWLockExclusive(&g_sites_lock);
         for (int pass = 0; pass < 16; ++pass) {   // the 16 busiest, busiest first
@@ -246,6 +249,7 @@ void Hooked_BcUpdate(int64_t *handle) {
             CheckSim(Port(handle));
         }
         g_in_update = true;
+        g_idle = false;
     }
     Real_BcUpdate(handle);
     g_in_update = false;
@@ -255,8 +259,16 @@ void Hooked_BcUpdate(int64_t *handle) {
 // what arrived to the game and send what is queued -- instead of only the send half. The
 // client then answers the server (and sees its updates) up to a frame sooner. Packets are
 // handled between phases rather than only at frame start.
+void FramePhaseNet(int64_t phase);
 void Hooked_FramePhase(void *game, int64_t phase) {
     Real_FramePhase(game, phase);
+    FramePhaseNet(phase);
+    // The frame's work is done after its last phase: from here until the next frame's
+    // broadcaster update the main thread only waits (idle_pump).
+    if ((phase & 3) == 3 && GetCurrentThreadId() == g_main_thread) g_idle = true;
+}
+
+void FramePhaseNet(int64_t phase) {
     int64_t *h = g_handle;
     if (!h || GetCurrentThreadId() != g_main_thread) return;
     if (g_drain) {
@@ -292,6 +304,90 @@ void Hooked_FramePhase(void *game, int64_t phase) {
     }
     *gate = old_gate;
     g_in_flush = false;
+}
+
+// idle_pump=1: reads the socket and runs the broadcaster update if a packet is waiting.
+void PumpIfReadable() {
+    int64_t *h = g_handle;
+    if (!h || !*h) return;
+    WSAPOLLFD poll = { *(SOCKET *)(Port(h) + 8), POLLRDNORM, 0 };
+    if (WSAPoll(&poll, 1, 0) <= 0 || !(poll.revents & POLLRDNORM)) return;
+    g_pumping = true;
+    float *gate = (float *)((uint8_t *)*h + 0x450);
+    float old_gate = *gate;
+    *gate = 0.0f;
+    __try {
+        Real_BcUpdate(h);
+        g_idle_pumps++;
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        g_idle_pump = 0;
+        Log("broadcaster update threw between frames; idle_pump disabled");
+    }
+    *gate = old_gate;
+    g_pumping = false;
+}
+
+bool ShouldPump() {
+    return g_idle_pump && g_idle && !g_pumping && t_in_wait == 0 && g_handle &&
+           GetCurrentThreadId() == g_main_thread;
+}
+
+// A wait the main thread makes between frames, cut into 1 ms slices with the socket serviced
+// between them. It still returns the moment its object is signalled, so frame timing is the
+// game's own; only the network gets attention while it waits.
+template <typename Wait>
+DWORD PumpedWait(DWORD timeout, Wait wait) {
+    t_in_wait++;
+    int64_t start = Now();
+    DWORD result;
+    for (;;) {
+        DWORD slice = 1;
+        if (timeout != INFINITE) {
+            double left = timeout - Ms(Now() - start);
+            if (left <= 0) { result = WAIT_TIMEOUT; break; }
+            if (left < 1) slice = 0;
+        }
+        result = wait(slice);
+        if (result != WAIT_TIMEOUT) break;
+        PumpIfReadable();
+        if (slice == 0) { result = WAIT_TIMEOUT; break; }
+    }
+    t_in_wait--;
+    return result;
+}
+
+using wait1_fn = DWORD (WINAPI *)(HANDLE, DWORD);
+using wait1ex_fn = DWORD (WINAPI *)(HANDLE, DWORD, BOOL);
+using waitn_fn = DWORD (WINAPI *)(DWORD, const HANDLE *, BOOL, DWORD);
+using waitnex_fn = DWORD (WINAPI *)(DWORD, const HANDLE *, BOOL, DWORD, BOOL);
+using sleepex_fn = DWORD (WINAPI *)(DWORD, BOOL);
+wait1_fn Real_WaitForSingleObject = WaitForSingleObject;
+wait1ex_fn Real_WaitForSingleObjectEx = WaitForSingleObjectEx;
+waitn_fn Real_WaitForMultipleObjects = WaitForMultipleObjects;
+waitnex_fn Real_WaitForMultipleObjectsEx = WaitForMultipleObjectsEx;
+sleepex_fn Real_SleepEx = SleepEx;
+
+DWORD WINAPI Hooked_WaitForSingleObject(HANDLE h, DWORD ms) {
+    if (ms == 0 || !ShouldPump()) return Real_WaitForSingleObject(h, ms);
+    return PumpedWait(ms, [&](DWORD slice) { return Real_WaitForSingleObject(h, slice); });
+}
+DWORD WINAPI Hooked_WaitForSingleObjectEx(HANDLE h, DWORD ms, BOOL alertable) {
+    if (ms == 0 || !ShouldPump()) return Real_WaitForSingleObjectEx(h, ms, alertable);
+    return PumpedWait(ms, [&](DWORD slice) { return Real_WaitForSingleObjectEx(h, slice, alertable); });
+}
+DWORD WINAPI Hooked_WaitForMultipleObjects(DWORD n, const HANDLE *hs, BOOL all, DWORD ms) {
+    if (ms == 0 || !ShouldPump()) return Real_WaitForMultipleObjects(n, hs, all, ms);
+    return PumpedWait(ms, [&](DWORD slice) { return Real_WaitForMultipleObjects(n, hs, all, slice); });
+}
+DWORD WINAPI Hooked_WaitForMultipleObjectsEx(DWORD n, const HANDLE *hs, BOOL all, DWORD ms, BOOL alertable) {
+    if (ms == 0 || !ShouldPump()) return Real_WaitForMultipleObjectsEx(n, hs, all, ms, alertable);
+    return PumpedWait(ms, [&](DWORD slice) { return Real_WaitForMultipleObjectsEx(n, hs, all, slice, alertable); });
+}
+DWORD WINAPI Hooked_SleepEx(DWORD ms, BOOL alertable) {
+    if (ms == 0 || ms == INFINITE || !ShouldPump()) return Real_SleepEx(ms, alertable);
+    // A sleep is a wait that always times out: slice it the same way.
+    DWORD r = PumpedWait(ms, [&](DWORD slice) { DWORD x = Real_SleepEx(slice, alertable); return x == 0 ? (DWORD)WAIT_TIMEOUT : x; });
+    return r == WAIT_TIMEOUT ? 0 : r;
 }
 
 // Before a state sender runs: remember its own intervals the first time, then either
@@ -416,6 +512,11 @@ void Install() {
     DetourAttach(&(PVOID &)Real_FramePhase, Hooked_FramePhase);
     DetourAttach(&(PVOID &)Real_BcSend, Hooked_BcSend);
     DetourAttach(&(PVOID &)Real_sendto, Hooked_sendto);
+    DetourAttach(&(PVOID &)Real_WaitForSingleObject, Hooked_WaitForSingleObject);
+    DetourAttach(&(PVOID &)Real_WaitForSingleObjectEx, Hooked_WaitForSingleObjectEx);
+    DetourAttach(&(PVOID &)Real_WaitForMultipleObjects, Hooked_WaitForMultipleObjects);
+    DetourAttach(&(PVOID &)Real_WaitForMultipleObjectsEx, Hooked_WaitForMultipleObjectsEx);
+    DetourAttach(&(PVOID &)Real_SleepEx, Hooked_SleepEx);
     LONG rc = DetourTransactionCommit();
     Log(rc == NO_ERROR ? "hooked (qpc %lld Hz)" : "hook failed (%lld)", rc == NO_ERROR ? g_freq.QuadPart : (long long)rc);
 }

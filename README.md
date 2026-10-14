@@ -48,6 +48,30 @@ Windows tags it (DSCP / 802.1p) and Wi-Fi (WMM) / QoS-aware routers send it firs
 rights needed; it only helps your upload, and only on networks that honour it. Windows
 refuses flows to LAN addresses (error 1168), which is harmless.
 
+## Experimental: reading the socket sooner (`drain=1`, `idle_pump=1`)
+
+Stock Echo reads the socket once per frame, at its start, so a packet from the server can
+sit there for most of a frame before the game sees it. The server's ping message is answered
+inside that read (by `CR15NetGame::OnR15NetServerFrameMsg`), so a sooner read means a sooner
+answer.
+
+- `drain=1` runs the whole broadcaster update (read, handle, send) after every frame phase
+  instead of only the send half. Packets are then handled between phases as well as at frame
+  start.
+- `idle_pump=1` keeps reading while the main thread waits between frames (for the headset or
+  the frame pacer): those waits are cut into 1 ms slices with the socket checked between them.
+  A wait still ends the moment it would have, so frame timing doesn't change.
+
+Both are off by default. Against a server on the same PC they changed the ping by 1-2 ms,
+which is within run-to-run noise there; what they can save over the internet (up to most of a
+frame) needs testing on a real server. `EchoNET.log` counts the extra reads.
+
+## The F9 "Avg Ping"
+
+On a client it is always 0.00: it is filled from the client's ping reply, which only the
+server receives. The ping the game shows you (scoreboard, `/session`) is the server's
+estimate, sent back to you.
+
 ## Build / install
 
 ```
