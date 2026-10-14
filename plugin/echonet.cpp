@@ -35,6 +35,7 @@
 #include <stdio.h>
 #include <string.h>
 #include "detours.h"
+#pragma comment(lib, "winmm.lib")
 
 namespace {
 
@@ -74,7 +75,15 @@ sendto_fn Real_sendto = sendto;
 
 int64_t *volatile g_handle = nullptr;   // the game's broadcaster (the one with a socket)
 DWORD g_main_thread = 0;
-volatile LONG g_flush = 1, g_zero_sim = 1, g_qos = 1, g_trace = 0, g_every_frame = 0;
+volatile LONG g_flush = 1, g_zero_sim = 1, g_qos = 1, g_trace = 0, g_every_frame = 0, g_drain = 0;
+uint64_t g_drains = 0;   // drain=1: mid-frame socket reads this report window
+// idle_pump=1: while the main thread waits between frames (for the headset or the frame pacer)
+// it still reads the socket. g_idle is true from the end of the last frame phase until the
+// next frame's broadcaster update.
+volatile LONG g_idle_pump = 0;
+bool g_idle = false, g_pumping = false;
+uint64_t g_idle_pumps = 0;
+thread_local int t_in_wait = 0;
 
 // send_every_frame: the intervals each state sender had, so 0 puts them back
 struct SenderIntervals { void *cs; uint64_t under6, six_up; };
@@ -143,8 +152,17 @@ void ReadIni() {
     LONG qos = GetPrivateProfileIntA("net", "qos", 1, path);
     LONG trace = GetPrivateProfileIntA("net", "trace", 0, path);
     LONG every = GetPrivateProfileIntA("net", "send_every_frame", 0, path);
-    if (flush != g_flush || zero != g_zero_sim || qos != g_qos || trace != g_trace || every != g_every_frame)
-        Log("ini: flush=%ld zero_sim=%ld qos=%ld trace=%ld send_every_frame=%ld", flush, zero, qos, trace, every);
+    LONG drain = GetPrivateProfileIntA("net", "drain", 0, path);
+    LONG idle_pump = GetPrivateProfileIntA("net", "idle_pump", 0, path);
+    if (idle_pump != g_idle_pump) {
+        Log("ini: idle_pump=%ld", idle_pump);
+        if (idle_pump) timeBeginPeriod(1);   // 1 ms wait slices
+        else if (g_idle_pump) timeEndPeriod(1);
+    }
+    g_idle_pump = idle_pump;
+    if (flush != g_flush || zero != g_zero_sim || qos != g_qos || trace != g_trace || every != g_every_frame || drain != g_drain)
+        Log("ini: flush=%ld zero_sim=%ld qos=%ld trace=%ld send_every_frame=%ld drain=%ld", flush, zero, qos, trace, every, drain);
+    g_drain = drain;
     g_flush = flush;
     g_zero_sim = zero;
     g_qos = qos;
@@ -183,7 +201,10 @@ void Report(int64_t now) {
             s.frames, Ms(s.frame_ticks) / s.frames, s.sends_in_update, s.sends_early,
             s.sends_early ? Ms(s.early_offset_ticks) / s.sends_early : 0.0,
             s.phase_sends[0], s.phase_sends[1], s.phase_sends[2], s.phase_sends[3], s.sends_other);
+        if (g_drain)
+            Log("  drain: %llu mid-frame socket reads", (unsigned long long)g_drains);
     }
+    g_drains = 0;
     if (g_trace) {
         AcquireSRWLockExclusive(&g_sites_lock);
         for (int pass = 0; pass < 16; ++pass) {   // the 16 busiest, busiest first
@@ -230,10 +251,32 @@ void Hooked_BcUpdate(int64_t *handle) {
     g_in_update = false;
 }
 
+// drain=1: after each frame phase, run the whole broadcaster update -- read the socket, hand
+// what arrived to the game and send what is queued -- instead of only the send half. The
+// client then answers the server (and sees its updates) up to a frame sooner. Packets are
+// handled between phases rather than only at frame start.
 void Hooked_FramePhase(void *game, int64_t phase) {
     Real_FramePhase(game, phase);
     int64_t *h = g_handle;
-    if (!g_flush || !h || GetCurrentThreadId() != g_main_thread) return;
+    if (!h || GetCurrentThreadId() != g_main_thread) return;
+    if (g_drain) {
+        g_in_flush = true;
+        g_flush_phase = (int)(phase & 3);
+        float *gate = (float *)((uint8_t *)*h + 0x450);
+        float old_gate = *gate;
+        *gate = 0.0f;
+        __try {
+            Real_BcUpdate(h);
+            g_drains++;
+        } __except (EXCEPTION_EXECUTE_HANDLER) {
+            g_drain = 0;
+            Log("broadcaster update threw mid-frame; drain disabled");
+        }
+        *gate = old_gate;
+        g_in_flush = false;
+        return;
+    }
+    if (!g_flush) return;
     g_in_flush = true;
     g_flush_phase = (int)(phase & 3);
     // SendFlush skips itself if the last flush was under +0x450 seconds (1 ms) ago; the
